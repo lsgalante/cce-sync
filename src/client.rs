@@ -1,7 +1,7 @@
 //! A device's side of sync, as a state machine with no I/O: what to
 //! download, remove and push, given the server's changes and what the
 //! device holds. The laptop daemon drives it over a folder; cce-vault-web
-//! will drive it over IndexedDB.
+//! drives it over IndexedDB (with placeholders for attachments on top).
 //!
 //! What a pass looks like, in host terms:
 //!

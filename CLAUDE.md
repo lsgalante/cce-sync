@@ -2,9 +2,11 @@
 
 The vault's sync engine. One library shared by the server
 (`cce-sync-server`, a Cloudflare Durable Object), the laptop (this crate's
-`cce-sync` daemon) and, from phase 4, the phone (`cce-vault-web`). The
-plan is the doc "cce-sync: design"; phases 1-3 are here (3: the MCP tools
-Claude's connector calls, served by cce-sync-server).
+`cce-sync` daemon) and the phone (`cce-vault-web`, which drives `client`
+from the browser, with lazy attachments on top). The plan is the doc
+"cce-sync: design"; phases 1-4 are here (3: the MCP tools Claude's
+connector calls, served by cce-sync-server; 4: the phone, whose side is in
+cce-vault-web and whose sign-in and static site are in cce-sync-server).
 
 Read `../cce-compositor/WORKSPACE.md` first (multi-repo rule, standalone
 builds, concurrent sessions) and `../cce-vault/CLAUDE.md` for the vault's
@@ -170,6 +172,6 @@ without one, write the token to `~/.config/cce/cce-sync.token` (mode 600).
 
 ## Not done yet (later phases)
 
-The laptop on OAuth instead of the shared token; the phone on this
-protocol (phase 4); a status-bar segment reading the socket; history in
+The laptop on OAuth instead of the shared token; a status-bar segment
+reading the socket; history in
 cce-notes; the Google bridge's agenda in `daily_note` (phase 6).
