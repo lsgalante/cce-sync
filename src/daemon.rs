@@ -133,11 +133,27 @@ fn claim() -> Result<UnixListener, String> {
     UnixListener::bind(&path).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-fn serve(listener: UnixListener, status: Arc<Mutex<DaemonStatus>>, tx: Sender<Event>) {
+fn serve(listener: UnixListener, status: Arc<Mutex<DaemonStatus>>, tx: Sender<Event>, http: Client) {
     std::thread::spawn(move || {
         for conn in listener.incoming() {
             let Ok(mut conn) = conn else { continue };
             let Some(line) = cce_core::ipc::read_request_line(&conn, 4096, Duration::from_secs(2)) else { continue };
+            // `agenda <YYYY-MM-DD>`: the day's events (JSON), for cce-notes,
+            // which holds no token. It waits on the server, so off this loop.
+            if let Some(date) = line.trim().strip_prefix("agenda ") {
+                let (http, date) = (http.clone(), date.trim().to_string());
+                std::thread::spawn(move || {
+                    let reply = match cce_sync::agenda::parse_date_ok(&date) {
+                        false => "error a date is YYYY-MM-DD".to_string(),
+                        true => match http.agenda(&date) {
+                            Ok(a) => serde_json::to_string(&a).unwrap_or_default(),
+                            Err(e) => format!("error {e}"),
+                        },
+                    };
+                    let _ = conn.write_all(format!("{reply}\n").as_bytes());
+                });
+                continue;
+            }
             let reply = match line.trim() {
                 "ping" => "pong".to_string(),
                 "status" => serde_json::to_string(&*status.lock().unwrap()).unwrap_or_default(),
@@ -258,7 +274,7 @@ pub fn run(http: Client, root: PathBuf) -> Result<(), String> {
         ..DaemonStatus::default()
     }));
     let (tx, rx) = channel();
-    serve(listener, status.clone(), tx.clone());
+    serve(listener, status.clone(), tx.clone(), http.clone());
     let _watcher = watch(&root, tx.clone())?;
     live(http.live_url(), http.auth().to_string(), tx.clone(), status.clone());
     log(&format!("syncing {} with {} (state {})", root.display(), http.server(), state_file.display()));

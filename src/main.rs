@@ -39,6 +39,7 @@ commands:
                             the server's version stays in history
   status                    the daemon's state and what the server holds
   history <note>            a file's revisions, newest first
+  agenda [YYYY-MM-DD]       the day's Google Calendar events (default today)
   restore <note> <rev>      put an earlier revision back (as a new one)
   grants                    what Claude (and other OAuth clients) may access
   revoke <grant>            end a grant: its tokens stop working at once
@@ -241,6 +242,21 @@ fn run() -> Result<(), String> {
             Ok(())
         }
         Some("status") => status(&args),
+        Some("agenda") => {
+            let date = match args.rest.get(1) {
+                Some(d) => d.clone(),
+                None => chrono::Local::now().format("%Y-%m-%d").to_string(),
+            };
+            if !cce_sync::agenda::parse_date_ok(&date) {
+                return Err(format!("{date}: a date is YYYY-MM-DD"));
+            }
+            let a = client(&args)?.agenda(&date)?;
+            println!("{date} ({})", if a.time_zone.is_empty() { "no zone" } else { &a.time_zone });
+            for l in a.lines() {
+                println!("  {l}");
+            }
+            Ok(())
+        }
         Some("history") => {
             let name = args.rest.get(1).ok_or("history needs a note")?;
             let path = vault_path(&args, name)?;

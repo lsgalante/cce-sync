@@ -67,6 +67,22 @@ impl Reply {
     }
 }
 
+/// Where `daily_note` gets the day's events: the server's Google bridge.
+pub trait AgendaSource {
+    /// The agenda of a local day (`YYYY-MM-DD`); `None` when there is
+    /// none to give (no bridge, or Google unreachable).
+    fn agenda(&self, date: &str) -> impl std::future::Future<Output = Option<crate::agenda::Agenda>>;
+}
+
+/// No agenda (tests, a host without the bridge).
+pub struct NoAgenda;
+
+impl AgendaSource for NoAgenda {
+    async fn agenda(&self, _: &str) -> Option<crate::agenda::Agenda> {
+        None
+    }
+}
+
 /// The MCP server's state across requests: the cached index.
 #[derive(Default)]
 pub struct Mcp {
@@ -101,8 +117,14 @@ impl Mcp {
         Mcp::default()
     }
 
-    /// Handle one POST to `/mcp`.
+    /// Handle one POST to `/mcp`, with no agenda source.
     pub async fn handle<S: Store>(&mut self, vault: &mut Vault<S>, body: &[u8], now: i64) -> Reply {
+        self.handle_with(vault, body, now, &NoAgenda).await
+    }
+
+    /// Handle one POST to `/mcp`; `daily_note` adds the day's events from
+    /// `agenda` (the server's Google bridge).
+    pub async fn handle_with<S: Store, A: AgendaSource>(&mut self, vault: &mut Vault<S>, body: &[u8], now: i64, agenda: &A) -> Reply {
         let Ok(msg) = serde_json::from_slice::<Value>(body) else {
             return rpc_err(&Value::Null, -32700, "parse error");
         };
@@ -137,7 +159,7 @@ impl Mcp {
                 if !tools().iter().any(|t| t["name"] == name) {
                     return rpc_err(&id, -32602, &format!("unknown tool: {name}"));
                 }
-                let result = match self.call(vault, &name, &args, now).await {
+                let result = match self.call(vault, &name, &args, now, agenda).await {
                     Ok(v) => v,
                     Err(ToolError(e)) => json!({ "content": [{ "type": "text", "text": e }], "isError": true }),
                 };
@@ -206,7 +228,7 @@ impl Mcp {
         }
     }
 
-    async fn call<S: Store>(&mut self, vault: &mut Vault<S>, name: &str, a: &Value, now: i64) -> ToolResult {
+    async fn call<S: Store, A: AgendaSource>(&mut self, vault: &mut Vault<S>, name: &str, a: &Value, now: i64, agenda: &A) -> ToolResult {
         match name {
             "search" => {
                 let q = req_str(a, "query")?;
@@ -335,10 +357,17 @@ impl Mcp {
                 let date = req_date(a, "date")?;
                 let index = self.index(vault).await?;
                 let path = daily_config(index).path_for(date);
-                match index.read_text(&path) {
-                    Ok(body) => Ok(text(format!("path: {path}\nrev: {}\n---\n{body}", meta_of(vault, &path)?.rev))),
-                    Err(_) => Ok(text(format!("path: {path}\n(no note for {date} yet; append_daily creates it from the template)"))),
-                }
+                let note = match index.read_text(&path) {
+                    Ok(body) => format!("path: {path}\nrev: {}\n---\n{body}", meta_of(vault, &path)?.rev),
+                    Err(_) => format!("path: {path}\n(no note for {date} yet; append_daily creates it from the template)"),
+                };
+                let events = match agenda.agenda(&date.to_string()).await {
+                    Some(a) if a.connected => {
+                        format!("\n---\nagenda (Google Calendar, {}; not part of the note):\n{}", a.time_zone, a.lines().join("\n"))
+                    }
+                    _ => String::new(),
+                };
+                Ok(text(format!("{note}{events}")))
             }
             "history" => {
                 let index = self.index(vault).await?;
@@ -741,7 +770,7 @@ pub fn tools() -> Vec<Value> {
                 "path": s("Only in this note or folder"),
                 "tag": s("Only tasks in notes with this tag, or carrying it"),
             }), &[], true, false),
-        tool("daily_note", "Read a daily note", "The daily note for a date (its path even when it doesn't exist yet).",
+        tool("daily_note", "Read a daily note", "The daily note for a date (its path even when it doesn't exist yet), and that day's events from Google Calendar when it is connected.",
             json!({ "date": date }), &["date"], true, false),
         tool("history", "History", "Every revision of a file, newest first, with who made it (laptop, phone, claude) and when; deleted files too.",
             json!({ "path": path }), &["path"], true, false),
@@ -878,6 +907,30 @@ mod tests {
         // The index follows an edit made by a device in between.
         run(v.apply(vec![Operation::Put { path: "N.md".into(), pre: Pre::Rev(3), bytes: b"from the laptop\n".to_vec() }], "laptop", 2)).unwrap();
         assert!(ok(&mut m, &mut v, "read_note", json!({ "path": "N" })).ends_with("from the laptop\n"));
+    }
+
+    #[test]
+    fn daily_note_carries_the_days_events() {
+        struct Fake;
+        impl AgendaSource for Fake {
+            async fn agenda(&self, date: &str) -> Option<crate::agenda::Agenda> {
+                Some(crate::agenda::Agenda {
+                    date: date.into(),
+                    connected: true,
+                    time_zone: "Europe/Berlin".into(),
+                    events: vec![crate::agenda::Event { id: "p/1".into(), title: "Standup".into(), start: "09:00".into(), end: "09:15".into(), ..Default::default() }],
+                })
+            }
+        }
+        let mut v = vault(&[("2026-10-13.md", "- met Ana\n")]);
+        let mut m = Mcp::new();
+        let req = json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": { "name": "daily_note", "arguments": { "date": "2026-10-13" } } });
+        let r = run(m.handle_with(&mut v, req.to_string().as_bytes(), 1000, &Fake));
+        let body: Value = serde_json::from_str(r.body.as_deref().unwrap()).unwrap();
+        let t = body["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(t.contains("- met Ana\n\n---\nagenda (Google Calendar, Europe/Berlin; not part of the note):\n09:00–09:15  Standup"), "{t}");
+        // Without a source, the note alone.
+        assert!(!ok(&mut m, &mut v, "daily_note", json!({ "date": "2026-10-13" })).contains("agenda"));
     }
 
     #[test]

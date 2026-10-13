@@ -6,6 +6,7 @@ use cce_sync::proto::{
 };
 use ureq::Agent;
 
+#[derive(Clone)]
 pub struct Client {
     agent: Agent,
     server: String,
@@ -106,6 +107,11 @@ impl Client {
 
     pub fn listing(&self) -> Result<Listing, String> {
         self.get("files")
+    }
+
+    /// The local day's events from the server's Google bridge.
+    pub fn agenda(&self, date: &str) -> Result<cce_sync::agenda::Agenda, String> {
+        self.get(&format!("agenda?date={date}"))
     }
 
     pub fn status(&self) -> Result<Status, String> {
