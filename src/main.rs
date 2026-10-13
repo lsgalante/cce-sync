@@ -40,6 +40,8 @@ commands:
   status                    the daemon's state and what the server holds
   history <note>            a file's revisions, newest first
   restore <note> <rev>      put an earlier revision back (as a new one)
+  grants                    what Claude (and other OAuth clients) may access
+  revoke <grant>            end a grant: its tokens stop working at once
   login                     store the token (read from stdin) in the keyring
   import <dir> [--dry-run]  upload a folder, create-only (writes .cce/vault.kdl
                             from .obsidian/)
@@ -261,6 +263,27 @@ fn run() -> Result<(), String> {
             if daemon::ask("sync").is_none() {
                 println!("(no daemon running: `cce-sync sync` brings it to the folder)");
             }
+            Ok(())
+        }
+        Some("grants") => {
+            for g in client(&args)?.grants()? {
+                let at = |k: &str| g[k].as_i64().map_or_else(String::new, |s| fmt_time(s * 1000));
+                println!(
+                    "{}  {:<24} {}  since {}  last used {}{}",
+                    g["id"].as_str().unwrap_or_default(),
+                    g["client"].as_str().unwrap_or_default(),
+                    g["email"].as_str().unwrap_or_default(),
+                    at("created"),
+                    at("last_used"),
+                    if g["revoked"].as_bool().unwrap_or(false) { "  (revoked)" } else { "" }
+                );
+            }
+            Ok(())
+        }
+        Some("revoke") => {
+            let id = args.rest.get(1).ok_or("revoke needs a grant id (see `cce-sync grants`)")?;
+            client(&args)?.revoke(id)?;
+            println!("revoked {id}");
             Ok(())
         }
         Some("login") => login(&args),

@@ -3,7 +3,8 @@
 The vault's sync engine. One library shared by the server
 (`cce-sync-server`, a Cloudflare Durable Object), the laptop (this crate's
 `cce-sync` daemon) and, from phase 4, the phone (`cce-vault-web`). The
-plan is the doc "cce-sync: design"; phases 1 and 2 are here.
+plan is the doc "cce-sync: design"; phases 1-3 are here (3: the MCP tools
+Claude's connector calls, served by cce-sync-server).
 
 Read `../cce-compositor/WORKSPACE.md` first (multi-repo rule, standalone
 builds, concurrent sessions) and `../cce-vault/CLAUDE.md` for the vault's
@@ -19,11 +20,12 @@ The library (no I/O, builds for wasm32):
 | `merge` | `merge3`: the three-way line merge of a note |
 | `core` | The server's rules over a `Store`: `Vault::apply` (a batch of puts, deletes, moves, all or none), `changes`, `listing`, `read`, `history` |
 | `client` | A device's rules: `SyncState` (seq + each file's base rev and hash), what a listing or a feed page means locally (`Step`s), what to push, what each answer means. Two-device scenarios run against `core` in its tests |
+| `mcp` (feature `mcp`) | The MCP server Claude's connector calls: JSON-RPC (stateless Streamable HTTP), the tools, an in-memory `cce_vault::Index` rebuilt when the seq moves, writes as one batch from the device `claude` |
 | `mem` | `MemStore`, the in-memory `Store` the tests run on |
 | `tests.rs` | Scenarios for `core` |
 
 The binary (`daemon` feature, on by default; the wasm users depend with
-`default-features = false`):
+`default-features = false`, cce-sync-server adding `features = ["mcp"]`):
 
 | File | What it owns |
 | --- | --- |
@@ -88,6 +90,26 @@ Device side (`client`, and the daemon carrying it out):
 - **A first pass over a folder that already matches the server writes
   nothing** (it adopts each file whose hash matches). Phase 2's gate.
 
+MCP (`mcp`):
+
+- **Claude's writes are ordinary revisions from the device `claude`.** They
+  go through `Vault::apply` like a device's, so history, `restore_version`
+  and the laptop's conflict rules all apply. They use `Pre::Any` because
+  the tool runs under the vault lock on the current text; `write_note`
+  makes Claude name the rev it read before replacing a whole note.
+- **Attachments are placeholders in the index** (empty bytes, so links
+  resolve). The journal-to-batch step (`ops_from_journal`) turns a rename
+  into a server-side `Move`, so an attachment's bytes never pass through
+  the index, and refuses any other write of one. Never upload a
+  placeholder.
+- **The index is rebuilt when the vault's seq moved**, and kept current
+  after Claude's own commit. A refused commit drops it (it holds writes the
+  vault does not).
+- **Dates come from Claude.** The server runs on UTC; the daily-note tools
+  require the user's local date, and the server instructions say so.
+- **Daily-note settings are read from `.cce/vault.kdl`** (`daily { folder
+  format template }`), not `.obsidian/`.
+
 ## The daemon
 
 ```sh
@@ -122,7 +144,8 @@ files with no base that differ, the folder's version replaces the server's
 (which stays in history). It refuses while the daemon runs, and is never
 automatic (`a_folder_newer_than_its_import_can_win_on_request`).
 
-Other commands: `sync` (one pass, or asks the daemon), `history <note>`,
+Other commands: `grants` and `revoke <grant>` (what Claude has been
+allowed through OAuth, and ending it), `sync` (one pass, or asks the daemon), `history <note>`,
 `restore <note> <rev>` (the old bytes become a new revision; history is
 never rewritten), `import <dir>`.
 
@@ -147,6 +170,6 @@ without one, write the token to `~/.config/cce/cce-sync.token` (mode 600).
 
 ## Not done yet (later phases)
 
-OAuth instead of the shared token, and the MCP connector (phase 3); the
-phone on this protocol (phase 4); a status-bar segment reading the socket;
-history in cce-notes.
+The laptop on OAuth instead of the shared token; the phone on this
+protocol (phase 4); a status-bar segment reading the socket; history in
+cce-notes; the Google bridge's agenda in `daily_note` (phase 6).

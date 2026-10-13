@@ -120,6 +120,26 @@ impl Client {
         self.get(&format!("history/{}", encode_path(path)))
     }
 
+    /// The OAuth grants: what Claude (or another client) has been allowed.
+    pub fn grants(&self) -> Result<Vec<serde_json::Value>, String> {
+        self.get("grants")
+    }
+
+    /// Revoke a grant; its tokens stop working at once.
+    pub fn revoke(&self, id: &str) -> Result<(), String> {
+        let mut resp = self
+            .agent
+            .delete(format!("{}/grants/{}", self.base, encode_path(id)))
+            .header("authorization", &self.auth)
+            .call()
+            .map_err(|e| format!("DELETE grant: {e}"))?;
+        match resp.status().as_u16() {
+            200 => Ok(()),
+            404 => Err(format!("no grant {id}")),
+            s => Err(format!("DELETE grant: HTTP {s}: {}", resp.body_mut().read_to_string().unwrap_or_default())),
+        }
+    }
+
     /// The bytes with this hash (any version of any file).
     pub fn blob(&self, hash: &str) -> Result<Vec<u8>, String> {
         self.get_bytes(&format!("blobs/{hash}"))

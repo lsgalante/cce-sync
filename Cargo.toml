@@ -18,8 +18,12 @@ required-features = ["daemon"]
 # The library's other users (cce-sync-server, cce-vault-web, both wasm32,
 # where these don't build) depend on it with default-features = false.
 default = ["daemon"]
+# The MCP tools (`mcp`): the vault index and the daily-note settings. The
+# server builds this for wasm32.
+mcp = ["dep:cce-vault", "dep:chrono", "dep:kdl"]
 # The laptop binary: the daemon, import, status, history, restore, login.
 daemon = [
+    "mcp",
     "dep:ureq",
     "dep:walkdir",
     "dep:notify",
