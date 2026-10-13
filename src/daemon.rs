@@ -273,7 +273,7 @@ pub fn run(http: Client, root: PathBuf) -> Result<(), String> {
             Err(RecvTimeoutError::Disconnected) => return Err("event channel closed".into()),
         }
         while rx.try_recv().is_ok() {} // anything queued is covered by this pass
-        match pass::run(&http, &folder, &mut saved) {
+        match pass::run(&http, &folder, &mut saved, false) {
             Ok(report) => {
                 failures = 0;
                 wait = PERIODIC;

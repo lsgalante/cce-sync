@@ -32,6 +32,11 @@ usage: cce-sync [--server URL] [--device NAME] [--vault DIR] <command>
 commands:
   daemon                    keep the vault in step with the server (the service)
   sync                      one pass now (asks the daemon when it runs)
+  sync --prefer-local       one pass in which this folder's version of a file
+                            replaces the server's where they differ and the
+                            folder has no record of either (the first pass
+                            after an import the folder has moved on from);
+                            the server's version stays in history
   status                    the daemon's state and what the server holds
   history <note>            a file's revisions, newest first
   restore <note> <rev>      put an earlier revision back (as a new one)
@@ -214,7 +219,13 @@ fn run() -> Result<(), String> {
     match args.rest.first().map(String::as_str) {
         Some("daemon") => daemon::run(client(&args)?, vault(&args)?),
         Some("sync") => {
-            if daemon::ask("sync").is_some() {
+            let prefer_local = args.rest.iter().any(|a| a == "--prefer-local");
+            if prefer_local && daemon::ask("ping").is_some() {
+                return Err("--prefer-local is for before the daemon runs: stop it first \
+                            (systemctl --user stop cce-sync)"
+                    .into());
+            }
+            if !prefer_local && daemon::ask("sync").is_some() {
                 println!("asked the running daemon to sync");
                 return Ok(());
             }
@@ -222,7 +233,7 @@ fn run() -> Result<(), String> {
             let root = vault(&args)?;
             let state = daemon::state_path(http.server(), &root);
             let mut saved = daemon::load(&state, http.server(), &root);
-            let report = pass::run(&http, &Folder { root }, &mut saved)?;
+            let report = pass::run(&http, &Folder { root }, &mut saved, prefer_local)?;
             daemon::save(&state, &saved)?;
             print_report(&report);
             Ok(())

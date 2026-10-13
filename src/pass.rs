@@ -53,13 +53,20 @@ pub fn now_stamp() -> String {
     chrono::Local::now().format("%Y-%m-%d %H%M").to_string()
 }
 
-pub fn run(http: &Client, folder: &Folder, saved: &mut Saved) -> Result<Report, String> {
+/// One pass. `prefer_local` relists and lets this folder's version of any
+/// file it has no base for replace the server's (`sync --prefer-local`,
+/// once, after an import the folder has moved on from).
+pub fn run(http: &Client, folder: &Folder, saved: &mut Saved, prefer_local: bool) -> Result<Report, String> {
     let mut report = Report::default();
     let (local, skipped) = scan(&folder.root, &mut saved.cache)?;
     report.skipped = skipped;
 
     // Pull.
-    if !saved.sync.listed {
+    if prefer_local {
+        let listing = http.listing()?;
+        let steps = saved.sync.listing_preferring_local(&listing, &local);
+        carry_out(http, folder, &mut saved.sync, steps, &mut report)?;
+    } else if !saved.sync.listed {
         let listing = http.listing()?;
         let steps = saved.sync.listing(&listing, &local);
         carry_out(http, folder, &mut saved.sync, steps, &mut report)?;
@@ -69,7 +76,7 @@ pub fn run(http: &Client, folder: &Folder, saved: &mut Saved) -> Result<Report, 
             let page = http.changes(saved.sync.seq)?;
             if page.reset {
                 saved.sync.listed = false;
-                return run(http, folder, saved);
+                return run(http, folder, saved, false);
             }
             let steps = saved.sync.changes(&page, &local);
             if !steps.is_empty() {

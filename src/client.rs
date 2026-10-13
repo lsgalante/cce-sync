@@ -129,6 +129,23 @@ impl SyncState {
         self.pull(remote, local)
     }
 
+    /// [`listing`](Self::listing), for catching up a folder that is known
+    /// to be newer than the server: the first pass after an import, when
+    /// the folder kept changing (Obsidian, Dropbox) before the daemon ran.
+    /// A local file that differs from the server's and has no base takes
+    /// the server's current revision as its base, so the push replaces the
+    /// server's version (which stays in history) instead of the default:
+    /// keeping the local text as a conflict copy, the server's at the path.
+    /// Only for a pass the user asks for; never automatic.
+    pub fn listing_preferring_local(&mut self, listing: &Listing, local: &Local) -> Vec<Step> {
+        for f in &listing.files {
+            if !self.files.contains_key(&f.path) && local.get(&f.path).is_some_and(|h| *h != f.hash) {
+                self.files.insert(f.path.clone(), Base { rev: f.rev, hash: f.hash.clone() });
+            }
+        }
+        self.listing(listing, local)
+    }
+
     /// Take a page of the change feed. The caller handles `reset` (by
     /// listing instead) and `more` (by asking again from the new seq).
     pub fn changes(&mut self, page: &ChangesPage, local: &Local) -> Vec<Step> {
@@ -485,6 +502,43 @@ mod tests {
         laptop.pass(&mut w);
         assert_eq!(laptop.writes, 0);
         assert_eq!(w.server.store.seq, 2, "nothing pushed either");
+        assert!(laptop.state.pushes(&laptop.local()).is_empty());
+    }
+
+    #[test]
+    fn a_folder_newer_than_its_import_can_win_on_request() {
+        let mut w = world();
+        let mut import = Device::new("import");
+        import.write("Same.md", "same\n");
+        import.write("Edited.md", "as imported\n");
+        import.pass(&mut w);
+        // The folder kept changing before the daemon first ran.
+        let folder = |d: &mut Device| {
+            d.write("Same.md", "same\n");
+            d.write("Edited.md", "edited since the import\n");
+        };
+
+        // By default an unknown difference is a conflict: both kept.
+        let mut cautious = Device::new("laptop");
+        folder(&mut cautious);
+        let mut w2 = world();
+        import.state = SyncState::default();
+        import.pass(&mut w2);
+        cautious.pass(&mut w2);
+        assert_eq!(cautious.text("Edited.md"), Some("as imported\n"));
+        assert!(cautious.files.keys().any(|p| p.starts_with("Edited (conflict")));
+
+        // Asked to prefer the folder, it replaces the server's copy.
+        let mut laptop = Device::new("laptop");
+        folder(&mut laptop);
+        let steps = laptop.state.listing_preferring_local(&w.server.listing().unwrap(), &laptop.local());
+        laptop.carry_out(&w, steps);
+        laptop.pass(&mut w);
+        assert_eq!(laptop.writes, 0, "nothing in the folder was touched");
+        assert_eq!(laptop.files.len(), 2, "no conflict copy");
+        let (meta, bytes) = run(w.server.read("Edited.md")).unwrap().unwrap();
+        assert_eq!((meta.rev, bytes.as_slice()), (2, &b"edited since the import\n"[..]));
+        assert_eq!(w.server.history("Edited.md").unwrap().versions.len(), 2, "the imported text stays in history");
         assert!(laptop.state.pushes(&laptop.local()).is_empty());
     }
 

@@ -92,6 +92,7 @@ Device side (`client`, and the daemon carrying it out):
 
 ```sh
 cce-sync login                        # token into the keyring (secret service)
+cce-sync sync --prefer-local          # ONCE, first, if the folder changed since the import
 systemctl --user enable --now cce-sync.service
 cce-sync status                       # the daemon, then the server
 journalctl --user -u cce-sync -f
@@ -110,6 +111,16 @@ journalctl --user -u cce-sync -f
 - During the migration the vault can stay inside the Dropbox folder: Dropbox
   and cce-sync then both write it, and the folder bridges the phone (still
   on Dropbox) and the server. Both are conflict-safe.
+
+**The first pass after an import.** The daemon's first pass has no base
+for any file, so where the folder and the server differ it cannot tell
+which is newer, and treats it as a conflict: the server's version takes
+the path and the folder's is kept as a conflict copy. After an import the
+folder kept changing (Obsidian, Dropbox), the folder is the newer side, so
+run `cce-sync sync --prefer-local` once before starting the daemon: for
+files with no base that differ, the folder's version replaces the server's
+(which stays in history). It refuses while the daemon runs, and is never
+automatic (`a_folder_newer_than_its_import_can_win_on_request`).
 
 Other commands: `sync` (one pass, or asks the daemon), `history <note>`,
 `restore <note> <rev>` (the old bytes become a new revision; history is
