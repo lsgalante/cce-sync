@@ -24,7 +24,7 @@ use chrono::NaiveDate;
 use serde_json::{json, Value};
 
 use crate::core::{ApplyError, Operation, Store, Vault};
-use crate::proto::{b64_encode, hash, FileMeta, Kind, Pre, Refusal, Seq, SETTINGS_FILE};
+use crate::proto::{b64_encode, hash, FileMeta, Kind, Pre, Refusal, Seq};
 
 /// The protocol revisions this server speaks, newest first. An
 /// `initialize` naming one of them gets it back; anything else gets the
@@ -38,11 +38,11 @@ pub const DEVICE: &str = "claude";
 const IMAGE_MAX: u64 = 5 * 1024 * 1024;
 
 const INSTRUCTIONS: &str = "\
-This is the user's personal notes vault: Markdown notes in the style of Obsidian, kept in sync with \
+This is the user's personal notes vault: Markdown notes with wikilinks, kept in sync with \
 their laptop and phone. You have full read and write access.
 
 - Notes link with wikilinks in their shortest form, [[Note Name]] (add a folder only when two notes \
-share a name). #tags and YAML frontmatter properties are used as in Obsidian.
+share a name). Embeds are ![[name]]; #tags and YAML frontmatter properties are used.
 - Tasks are lines like `- [ ] text`, ticked as `- [x] text`. A due date is written at the end as \
 `📅 YYYY-MM-DD`.
 - Daily notes: use daily_note / append_daily with the user's LOCAL date (YYYY-MM-DD); the server's \
@@ -550,25 +550,10 @@ fn ops_from_journal<S: Store>(index: &Index, vault: &Vault<S>, written: Vec<Writ
     Ok(ops)
 }
 
-/// The vault's daily-note settings, from `.cce/vault.kdl` (`daily { folder
-/// format template }`), else cce-vault's defaults.
+/// The vault's daily-note settings, from `.cce/vault.kdl` (cce-vault's
+/// reading of it, the one every device uses).
 fn daily_config(index: &Index) -> cce_vault::daily::DailyConfig {
-    let mut cfg = cce_vault::daily::DailyConfig::default();
-    if let Ok(text) = index.read_text(SETTINGS_FILE) {
-        if let Ok(doc) = text.parse::<kdl::KdlDocument>() {
-            if let Some(daily) = doc.get("daily").and_then(|n| n.children()) {
-                let get = |k: &str| daily.get_arg(k).and_then(|v| v.as_string()).map(str::to_string);
-                cfg.folder = get("folder").unwrap_or_default();
-                cfg.format = get("format").unwrap_or_default();
-                cfg.template = get("template").unwrap_or_default();
-            }
-        }
-    }
-    cfg.folder = cfg.folder.trim().trim_matches('/').to_string();
-    if cfg.format.trim().is_empty() {
-        cfg.format = cce_vault::daily::DEFAULT_FORMAT.to_string();
-    }
-    cfg
+    cce_vault::daily::DailyConfig::load(index)
 }
 
 fn template(index: &Index, t: &str) -> Option<String> {

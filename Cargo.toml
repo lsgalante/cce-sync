@@ -18,9 +18,9 @@ required-features = ["daemon"]
 # The library's other users (cce-sync-server, cce-vault-web, both wasm32,
 # where these don't build) depend on it with default-features = false.
 default = ["daemon"]
-# The MCP tools (`mcp`): the vault index and the daily-note settings. The
-# server builds this for wasm32.
-mcp = ["dep:cce-vault", "dep:chrono", "dep:kdl"]
+# The MCP tools (`mcp`): the vault index, whose settings reader is the
+# daily notes' too. The server builds this for wasm32.
+mcp = ["dep:cce-vault", "dep:chrono"]
 # The laptop binary: the daemon, import, status, history, restore, login.
 daemon = [
     "mcp",
@@ -51,7 +51,7 @@ keyring = { version = "3", optional = true, features = ["sync-secret-service"] }
 chrono = { version = "0.4", optional = true, default-features = false, features = ["clock"] }
 kdl = { version = "4.6", optional = true }
 # The vault's root (config.kdl `vault { path }`) and its atomic write.
-cce-vault = { git = "https://github.com/lsgalante/cce-vault.git", rev = "ee2f46e35206779ad4fd5e4a1bdade01bde61977", optional = true }
+cce-vault = { git = "https://github.com/lsgalante/cce-vault.git", rev = "87fa1695aa3ef1b2a3afa9dd034f789a8aed8c76", optional = true }
 # read_request_line, for the status socket.
 cce-core = { git = "https://github.com/lsgalante/cce-core.git", rev = "388473078207ff41208e8648c04499e94632f20a", optional = true, default-features = false }
 

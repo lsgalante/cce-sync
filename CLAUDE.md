@@ -36,7 +36,7 @@ The binary (`daemon` feature, on by default; the wasm users depend with
 | `pass.rs` | One pass: pull, carry out steps, push rounds; `restore` |
 | `local.rs` | The folder: what syncs, hashes with a size+mtime cache, conditional writes (cce-vault's atomic write), removes that prune empty folders |
 | `http.rs` | The server's API, blocking (ureq) |
-| `import.rs` | `import`: a folder up, create-only; `.obsidian/` → `.cce/vault.kdl` |
+| `import.rs` | `import`: a folder up, create-only; an old vault's `.obsidian/` settings → `.cce/vault.kdl` (the one place anything reads `.obsidian/`, for bringing a vault over) |
 | `cce-sync.service` | The user unit (`WantedBy=default.target`, see below) |
 
 ## Invariants — each was a design decision, keep them
@@ -109,8 +109,9 @@ MCP (`mcp`):
   vault does not).
 - **Dates come from Claude.** The server runs on UTC; the daily-note tools
   require the user's local date, and the server instructions say so.
-- **Daily-note settings are read from `.cce/vault.kdl`** (`daily { folder
-  format template }`), not `.obsidian/`.
+- **Daily-note settings come from cce-vault** (`DailyConfig::load`, which
+  reads `daily { folder format template }` in `.cce/vault.kdl`), the same
+  reader cce-notes and the phone use. Never parse the file here again.
 
 ## The daemon
 
