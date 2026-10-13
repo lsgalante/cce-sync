@@ -4,9 +4,10 @@ The vault's sync engine. One library shared by the server
 (`cce-sync-server`, a Cloudflare Durable Object), the laptop (this crate's
 `cce-sync` daemon) and the phone (`cce-vault-web`, which drives `client`
 from the browser, with lazy attachments on top). The plan is the doc
-"cce-sync: design"; phases 1-4 are here (3: the MCP tools Claude's
+"cce-sync: design"; phases 1-6 are here (3: the MCP tools Claude's
 connector calls, served by cce-sync-server; 4: the phone, whose side is in
-cce-vault-web and whose sign-in and static site are in cce-sync-server).
+cce-vault-web and whose sign-in and static site are in cce-sync-server;
+6: the Google bridge's rules, `agenda` and `gtask`, which the server runs).
 
 Read `../cce-compositor/WORKSPACE.md` first (multi-repo rule, standalone
 builds, concurrent sessions) and `../cce-vault/CLAUDE.md` for the vault's
@@ -23,6 +24,8 @@ The library (no I/O, builds for wasm32):
 | `core` | The server's rules over a `Store`: `Vault::apply` (a batch of puts, deletes, moves, all or none), `changes`, `listing`, `read`, `history` |
 | `client` | A device's rules: `SyncState` (seq + each file's base rev and hash), what a listing or a feed page means locally (`Step`s), what to push, what each answer means. Two-device scenarios run against `core` in its tests |
 | `mcp` (feature `mcp`) | The MCP server Claude's connector calls: JSON-RPC (stateless Streamable HTTP), the tools, an in-memory `cce_vault::Index` rebuilt when the seq moves, writes as one batch from the device `claude` |
+| `agenda` | The Google bridge's agenda: which of Google Calendar's events fall on a local day (cut by local time text, no zone database), `Agenda::lines` for a daily note's ```` ```agenda ```` block |
+| `gtask` | `#gtask` lines kept in step with Google Tasks: `scan` a note, `plan` the acts against Google's tasks and the bases, `edit_note` the lines (found by id, or exact text) |
 | `mem` | `MemStore`, the in-memory `Store` the tests run on |
 | `tests.rs` | Scenarios for `core` |
 
@@ -109,9 +112,30 @@ MCP (`mcp`):
   vault does not).
 - **Dates come from Claude.** The server runs on UTC; the daily-note tools
   require the user's local date, and the server instructions say so.
+- **`daily_note` carries the day's agenda** from the host's
+  `AgendaSource` (`handle_with`), after the note and marked as not part
+  of it; Claude must not write it into the note.
 - **Daily-note settings come from cce-vault** (`DailyConfig::load`, which
   reads `daily { folder format template }` in `.cce/vault.kdl`), the same
   reader cce-notes and the phone use. Never parse the file here again.
+
+Google bridge (`agenda`, `gtask`; the server runs them):
+
+- **Google owns events; the vault only points at them.** Nothing from the
+  calendar is written into notes: the ```` ```agenda ```` block stays empty
+  in the file and is filled when drawn.
+- **A task is tied to Google by its id on the line** (`[gtask:: id]`),
+  never by its text. Every line edit finds its line by that id (or, for
+  attaching the id, by the exact text the plan saw) and is skipped when
+  the line is gone; a task created in Google whose id did not reach its
+  line is adopted by (path, text) next pass, never created twice.
+- **Fields sync against a base**, changed on one side copied to the other,
+  a clash going to the later change (the note's last write against
+  Google's `updated`). A base moves only once both sides hold it: after a
+  line edit lands, not when it is planned.
+- **Deleting is asymmetric on purpose**: deleted in Google, the line keeps
+  the task (untagged); the line deleted, the Google task goes. A removed
+  tag unlinks without deleting anything.
 
 ## The daemon
 
@@ -129,7 +153,9 @@ journalctl --user -u cce-sync -f
   `offline`.
 - State: `$XDG_STATE_HOME/cce/sync/<id>.json` (per server + vault pair).
   Socket: `$XDG_RUNTIME_DIR/cce/cce-sync.sock`, lines `status` (JSON),
-  `sync`, `ping`; it is also the single-instance lock.
+  `sync`, `ping`, and `agenda YYYY-MM-DD` (the day's events as JSON, or
+  `error …`; answered off the loop, for cce-notes, which holds no token);
+  it is also the single-instance lock.
 - **Not bound to `cce-session.target`**, unlike the GUI daemons: it holds no
   Wayland connection, and the vault should sync whenever the user is logged
   in, as Dropbox did. Conflicts go through `notify-send`.
@@ -150,7 +176,8 @@ automatic (`a_folder_newer_than_its_import_can_win_on_request`).
 Other commands: `grants` and `revoke <grant>` (what Claude has been
 allowed through OAuth, and ending it), `sync` (one pass, or asks the daemon), `history <note>`,
 `restore <note> <rev>` (the old bytes become a new revision; history is
-never rewritten), `import <dir>`.
+never rewritten), `import <dir>`, `agenda [date]` (the day's events from
+the bridge).
 
 ## Build and test
 
@@ -175,4 +202,5 @@ without one, write the token to `~/.config/cce/cce-sync.token` (mode 600).
 
 The laptop on OAuth instead of the shared token; a status-bar segment
 reading the socket; history in
-cce-notes; the Google bridge's agenda in `daily_note` (phase 6).
+cce-notes; linking a note from its Google Calendar event's description
+(the bridge's scope is read-only on Calendar).
