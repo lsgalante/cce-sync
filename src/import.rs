@@ -11,9 +11,10 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use cce_sync::proto::{check_path, hash, BatchOp, Pre, Refusal, SETTINGS_FILE};
+use cce_sync::proto::{hash, BatchOp, Pre, Refusal, SETTINGS_FILE};
 
-use crate::client::{BatchResult, Client};
+use crate::http::{Answer, Client};
+use crate::local::walk;
 
 /// A batch's limits: base64 makes bytes a third bigger on the wire, and the
 /// Worker takes 100 MB a request.
@@ -57,11 +58,11 @@ pub fn run(client: &Client, dir: &Path, dry_run: bool) -> Result<(), String> {
     for chunk in batches(todo) {
         let ops: Vec<BatchOp> = chunk.iter().map(|(p, b)| BatchOp::put(p.clone(), Pre::Absent, b)).collect();
         match client.batch(ops)? {
-            BatchResult::Committed(c) => {
+            Answer::Done(c) => {
                 uploaded += c.applied.len();
                 println!("uploaded {uploaded} (seq {})", c.seq);
             }
-            BatchResult::Refused(r) => return Err(refusal(&r, &chunk)),
+            Answer::Refused(r) => return Err(refusal(&r, &chunk)),
         }
     }
     println!("done: {uploaded} files");
@@ -81,33 +82,14 @@ fn refusal(r: &Refusal, chunk: &[(String, Vec<u8>)]) -> String {
 /// Files as (vault path, bytes).
 type Files = Vec<(String, Vec<u8>)>;
 
-/// Every syncable file under `dir`, and the names that were skipped as
-/// invalid. Hidden paths other than `.cce/` are ignored silently, as
-/// cce-vault ignores them.
+/// Every syncable file under `dir` with its bytes, and the names skipped
+/// as invalid (hidden paths other than `.cce/` are ignored silently, as
+/// cce-vault ignores them).
 fn collect(dir: &Path) -> Result<(Files, Vec<String>), String> {
-    let mut files = Vec::new();
-    let mut skipped = Vec::new();
-    let walk = walkdir::WalkDir::new(dir).follow_links(false).sort_by_file_name().into_iter();
-    // Don't descend into hidden folders at all (.git, .obsidian, .trash),
-    // except the settings folder.
-    let walk = walk.filter_entry(|e| {
-        e.depth() == 0 || !e.file_name().to_string_lossy().starts_with('.') || e.file_name() == ".cce"
-    });
-    for entry in walk {
-        let entry = entry.map_err(|e| e.to_string())?;
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let rel = entry.path().strip_prefix(dir).map_err(|e| e.to_string())?;
-        let Some(rel) = rel.to_str().map(|s| s.replace(std::path::MAIN_SEPARATOR, "/")) else {
-            skipped.push(format!("{} (name is not UTF-8)", rel.display()));
-            continue;
-        };
-        if let Err(e) = check_path(&rel) {
-            skipped.push(format!("{rel} ({e})"));
-            continue;
-        }
-        let bytes = std::fs::read(entry.path()).map_err(|e| format!("{rel}: {e}"))?;
+    let (paths, skipped) = walk(dir)?;
+    let mut files = Vec::with_capacity(paths.len());
+    for rel in paths {
+        let bytes = std::fs::read(dir.join(&rel)).map_err(|e| format!("{rel}: {e}"))?;
         files.push((rel, bytes));
     }
     Ok((files, skipped))

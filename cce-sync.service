@@ -1,0 +1,19 @@
+[Unit]
+Description=cce-sync: keep the vault folder in step with the server
+# Not bound to cce-session.target: this daemon holds no Wayland connection,
+# and the vault should keep syncing whenever the user is logged in, with or
+# without the compositor (as the Dropbox daemon did). Conflict notifications
+# go through notify-send, which needs only the session bus.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/cce-sync daemon
+Restart=on-failure
+RestartSec=10
+# The state file and socket live under $XDG_STATE_HOME and $XDG_RUNTIME_DIR,
+# both set for user services. notify-send is found on the default PATH.
+
+[Install]
+WantedBy=default.target

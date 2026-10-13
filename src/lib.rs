@@ -8,9 +8,11 @@
 //! - [`core`]: the server's write rules, change feed and history over a
 //!   [`core::Store`].
 //! - [`mem`]: an in-memory store, for tests and other hosts.
+//! - [`client`]: a device's side: what to download, remove and push.
 //!
 //! The design is the doc "cce-sync: design".
 
+pub mod client;
 pub mod core;
 pub mod mem;
 pub mod merge;
