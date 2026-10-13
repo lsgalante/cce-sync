@@ -30,7 +30,10 @@ const QUIET_CAP: Duration = Duration::from_secs(4);
 /// The safety-net pass, for anything the watcher or the socket missed.
 const PERIODIC: Duration = Duration::from_secs(300);
 const BACKOFF_MAX: Duration = Duration::from_secs(300);
-/// A keep-alive on the live socket; the server answers `pong`.
+/// A keep-alive on the live socket; the server answers `pong`. A socket
+/// that has said nothing for two of these is dead (a network change leaves
+/// the old connection half-open, and pings into it never fail) and is
+/// reconnected.
 const PING_EVERY: Duration = Duration::from_secs(30);
 
 enum Event {
@@ -217,8 +220,13 @@ fn live(url: String, auth: String, tx: Sender<Event>, status: Arc<Mutex<DaemonSt
                         _ => Ok(()),
                     };
                     status.lock().unwrap().live = true;
+                    let mut heard = Instant::now();
                     loop {
-                        match ws.read() {
+                        let read = ws.read();
+                        if read.is_ok() {
+                            heard = Instant::now();
+                        }
+                        match read {
                             Ok(Message::Text(t)) => {
                                 if let Ok(n) = serde_json::from_str::<cce_sync::proto::LiveNotice>(t.as_str()) {
                                     if tx.send(Event::Remote(n.seq)).is_err() {
@@ -231,6 +239,10 @@ fn live(url: String, auth: String, tx: Sender<Event>, status: Arc<Mutex<DaemonSt
                             Err(tungstenite::Error::Io(e))
                                 if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) =>
                             {
+                                if heard.elapsed() >= PING_EVERY * 2 {
+                                    log("live: no answer from the server, reconnecting");
+                                    break;
+                                }
                                 if ws.send(Message::text("ping")).is_err() {
                                     break;
                                 }
