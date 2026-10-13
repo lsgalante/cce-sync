@@ -18,8 +18,22 @@ required-features = ["daemon"]
 # The library's other users (cce-sync-server, cce-vault-web, both wasm32,
 # where these don't build) depend on it with default-features = false.
 default = ["daemon"]
-# The laptop binary (import, status; the daemon proper comes in phase 2).
-daemon = ["dep:ureq", "dep:walkdir"]
+# The MCP tools (`mcp`): the vault index, whose settings reader is the
+# daily notes' too. The server builds this for wasm32.
+mcp = ["dep:cce-vault", "dep:chrono"]
+# The laptop binary: the daemon, import, status, history, restore, login.
+daemon = [
+    "mcp",
+    "dep:ureq",
+    "dep:walkdir",
+    "dep:notify",
+    "dep:tungstenite",
+    "dep:keyring",
+    "dep:chrono",
+    "dep:kdl",
+    "dep:cce-vault",
+    "dep:cce-core",
+]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -29,6 +43,17 @@ base64 = "0.22"
 similar = "3"
 ureq = { version = "3", optional = true, features = ["json"] }
 walkdir = { version = "2.5", optional = true }
+notify = { version = "8.2", optional = true }
+tungstenite = { version = "0.30", optional = true, features = ["rustls-tls-webpki-roots"] }
+# The token, in the secret service under ("cce-sync", <server>), as
+# cce-calendar keeps cce-mail's passwords.
+keyring = { version = "3", optional = true, features = ["sync-secret-service"] }
+chrono = { version = "0.4", optional = true, default-features = false, features = ["clock"] }
+kdl = { version = "4.6", optional = true }
+# The vault's root (config.kdl `vault { path }`) and its atomic write.
+cce-vault = { git = "https://github.com/lsgalante/cce-vault.git", rev = "87fa1695aa3ef1b2a3afa9dd034f789a8aed8c76", optional = true }
+# read_request_line, for the status socket.
+cce-core = { git = "https://github.com/lsgalante/cce-core.git", rev = "388473078207ff41208e8648c04499e94632f20a", optional = true, default-features = false }
 
 [dev-dependencies]
 tempfile = "3"

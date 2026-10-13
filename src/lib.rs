@@ -8,11 +8,20 @@
 //! - [`core`]: the server's write rules, change feed and history over a
 //!   [`core::Store`].
 //! - [`mem`]: an in-memory store, for tests and other hosts.
+//! - [`client`]: a device's side: what to download, remove and push.
+//! - [`mcp`] (feature `mcp`): the MCP server Claude's connector calls.
+//! - [`agenda`], [`gtask`]: the Google bridge's rules (the day's events,
+//!   `#gtask` tasks kept in step with Google Tasks).
 //!
 //! The design is the doc "cce-sync: design".
 
+pub mod agenda;
+pub mod client;
 pub mod core;
+pub mod gtask;
 pub mod mem;
+#[cfg(feature = "mcp")]
+pub mod mcp;
 pub mod merge;
 pub mod proto;
 
