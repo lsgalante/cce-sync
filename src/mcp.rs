@@ -15,6 +15,10 @@
 //! change Claude makes is a revision, restorable, and listed under that
 //! device. A rename becomes a server-side move, so an attachment's bytes
 //! never pass through the index; a placeholder is never uploaded.
+//!
+//! Tables (`.csv`, `.tsv`) are attachments, so their tools go around the
+//! index: each write is one `Put` from `claude` conditional on the rev the
+//! tool read ([`crate::table`] checks the rows first).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -24,7 +28,8 @@ use chrono::NaiveDate;
 use serde_json::{json, Value};
 
 use crate::core::{ApplyError, Operation, Store, Vault};
-use crate::proto::{b64_encode, hash, FileMeta, Kind, Pre, Refusal, Seq};
+use crate::proto::{b64_encode, hash, FileMeta, Kind, Pre, Refusal, Rev, Seq};
+use crate::table;
 
 /// The protocol revisions this server speaks, newest first. An
 /// `initialize` naming one of them gets it back; anything else gets the
@@ -36,6 +41,9 @@ pub const DEVICE: &str = "claude";
 
 /// Images up to this size are returned as image content.
 const IMAGE_MAX: u64 = 5 * 1024 * 1024;
+
+/// Tables up to this size are shown whole; a larger one is read by rows.
+const TABLE_MAX: usize = 256 * 1024;
 
 const INSTRUCTIONS: &str = "\
 This is the user's personal notes vault: Markdown notes with wikilinks, kept in sync with \
@@ -49,6 +57,9 @@ share a name). Embeds are ![[name]]; #tags and YAML frontmatter properties are u
 clock is UTC.
 - Read a note before changing it. Prefer edit_note (replace an exact passage) or append_note for \
 small changes; write_note replaces a whole note and needs the rev you read.
+- Tables are .csv and .tsv files: read_table reads them, append_rows adds rows, edit_table replaces \
+an exact passage, write_table replaces the whole file and needs the rev you read. Every row must \
+have as many fields as the header. search does not look inside tables.
 - Every change is versioned. history and restore_version undo anything, including deletes.
 - Paths are vault paths like `Folder/Note.md`. Most tools also accept a bare note name and resolve \
 it the way a wikilink would.";
@@ -220,12 +231,22 @@ impl Mcp {
             }
             Err(e) => {
                 self.cache = None;
-                Err(ToolError(match e {
-                    ApplyError::Refused(r) => refusal_text(&r),
-                    ApplyError::Store(s) => s.to_string(),
-                }))
+                Err(apply_error(e))
             }
         }
+    }
+
+    /// Write a table's bytes as `claude`, conditional on `pre`, and return
+    /// its rev. The index holds tables as placeholders, so rewriting one it
+    /// already has leaves it current; a new one waits for the next rebuild.
+    async fn put_table<S: Store>(&mut self, vault: &mut Vault<S>, path: &str, bytes: Vec<u8>, pre: Pre, now: i64) -> Result<Rev, ToolError> {
+        let before = vault.store.seq()?;
+        let existed = vault.store.file(path)?.and_then(|r| r.meta()).is_some();
+        let c = vault.apply(vec![Operation::Put { path: path.to_string(), pre, bytes }], DEVICE, now).await.map_err(apply_error)?;
+        if let Some(cache) = self.cache.as_mut().filter(|c| existed && c.0 == before) {
+            cache.0 = c.seq;
+        }
+        Ok(c.applied[0].rev)
     }
 
     async fn call<S: Store, A: AgendaSource>(&mut self, vault: &mut Vault<S>, name: &str, a: &Value, now: i64, agenda: &A) -> ToolResult {
@@ -400,6 +421,7 @@ impl Mcp {
                             { "type": "image", "data": b64_encode(&bytes), "mimeType": m },
                         ]}))
                     }
+                    _ if table::delimiter(&path).is_some() => Ok(text(format!("{path}: {} bytes, rev {} (a table: use read_table)", meta.size, meta.rev))),
                     _ => Ok(text(format!("{path}: {} bytes, rev {} (not an image this tool returns)", meta.size, meta.rev))),
                 }
             }
@@ -500,6 +522,90 @@ impl Mcp {
                 index.delete(&path)?;
                 self.commit(vault, now).await?;
                 Ok(text(format!("deleted {path} (restore_version brings it back)")))
+            }
+            "read_table" => {
+                let (path, delim) = table_path(req_str(a, "path")?)?;
+                let (meta, body) = read_table(vault, &path).await?;
+                let mut header = vec![format!("path: {path}"), format!("rev: {}", meta.rev)];
+                let recs = match table::records(&body, delim) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        header.push(format!("warning: {e}"));
+                        if body.len() > TABLE_MAX {
+                            return Err(ToolError(format!("{path} can't be read as a table ({e}) and is too large to show whole")));
+                        }
+                        return Ok(text(format!("{}\n---\n{body}", header.join("\n"))));
+                    }
+                };
+                header.push(format!("rows: {} (not counting the header)", recs.len().saturating_sub(1)));
+                if let Some(h) = recs.first() {
+                    if let Some((n, r)) = recs.iter().enumerate().skip(1).find(|(_, r)| r.fields != h.fields) {
+                        header.push(format!("warning: row {n} (line {}) has {} fields; the header has {}", r.line, r.fields, h.fields));
+                    }
+                }
+                let (start, end) = (opt_u64(a, "start_row"), opt_u64(a, "end_row"));
+                let shown = if start.is_some() || end.is_some() {
+                    let from = start.unwrap_or(1).max(1) as usize;
+                    let to = end.map_or(usize::MAX, |e| e as usize);
+                    let rows = recs.iter().enumerate().filter(|(i, _)| *i == 0 || (*i >= from && *i <= to));
+                    rows.map(|(_, r)| &body[r.start..r.end]).collect::<Vec<_>>().join("\n")
+                } else if body.len() > TABLE_MAX {
+                    header.push(format!("{} bytes: too large to show whole; read it in parts with start_row and end_row", body.len()));
+                    recs.first().map_or(String::new(), |h| body[h.start..h.end].to_string())
+                } else {
+                    body
+                };
+                Ok(text(format!("{}\n---\n{shown}", header.join("\n"))))
+            }
+            "write_table" => {
+                let (path, delim) = table_path(req_str(a, "path")?)?;
+                let content = req_str(a, "content")?;
+                let expected = opt_u64(a, "expected_rev");
+                let recs = table::check(content, delim).map_err(|e| ToolError(format!("{path}: {e}")))?;
+                let current = vault.store.file(&path)?.and_then(|r| r.meta());
+                let pre = match (&current, expected) {
+                    (Some(m), None) => return Err(ToolError(format!("{path} exists (rev {}): pass expected_rev to replace it", m.rev))),
+                    (Some(m), Some(e)) if m.rev != e => {
+                        return Err(ToolError(format!("{path} is at rev {}, not {e}: it changed since you read it", m.rev)))
+                    }
+                    (Some(m), Some(_)) => Pre::Rev(m.rev),
+                    (None, Some(e)) if e != 0 => return Err(ToolError(format!("{path} does not exist (it may have been deleted)"))),
+                    (None, _) => Pre::Absent,
+                };
+                let rev = self.put_table(vault, &path, content.as_bytes().to_vec(), pre, now).await?;
+                let what = if current.is_some() { "replaced" } else { "created" };
+                Ok(text(format!("{what} {path} ({} rows), now rev {rev}", recs.len() - 1)))
+            }
+            "append_rows" => {
+                let (path, delim) = table_path(req_str(a, "path")?)?;
+                let rows = req_str(a, "rows")?;
+                if rows.trim().is_empty() {
+                    return Err(ToolError("rows is empty".into()));
+                }
+                let (meta, body) = read_table(vault, &path).await?;
+                let after = table::appended(&body, rows);
+                guard_table(&path, &body, &after, delim)?;
+                let added = table::records(rows, delim).map_or(0, |r| r.len());
+                let rev = self.put_table(vault, &path, after.into_bytes(), Pre::Rev(meta.rev), now).await?;
+                Ok(text(format!("appended {added} row{} to {path}, now rev {rev}", if added == 1 { "" } else { "s" })))
+            }
+            "edit_table" => {
+                let (path, delim) = table_path(req_str(a, "path")?)?;
+                let old = req_str(a, "old_text")?;
+                let new = req_str(a, "new_text")?;
+                let all = a.get("replace_all").and_then(Value::as_bool).unwrap_or(false);
+                let (meta, body) = read_table(vault, &path).await?;
+                let n = body.matches(old).count();
+                if old.is_empty() || n == 0 {
+                    return Err(ToolError(format!("old_text not found in {path}; read the table and quote it exactly")));
+                }
+                if n > 1 && !all {
+                    return Err(ToolError(format!("old_text occurs {n} times in {path}; quote more of it, or set replace_all")));
+                }
+                let after = if all { body.replace(old, new) } else { body.replacen(old, new, 1) };
+                guard_table(&path, &body, &after, delim)?;
+                let rev = self.put_table(vault, &path, after.into_bytes(), Pre::Rev(meta.rev), now).await?;
+                Ok(text(format!("edited {path} ({} replacement{}), now rev {rev}", if all { n } else { 1 }, if all && n > 1 { "s" } else { "" })))
             }
             "restore_version" => {
                 let path = req_str(a, "path")?.to_string();
@@ -658,6 +764,42 @@ fn meta_of<S: Store>(vault: &Vault<S>, path: &str) -> Result<FileMeta, ToolError
     vault.store.file(path)?.and_then(|r| r.meta()).ok_or_else(|| ToolError(format!("{path} does not exist")))
 }
 
+fn apply_error(e: ApplyError) -> ToolError {
+    ToolError(match e {
+        ApplyError::Refused(r) => refusal_text(&r),
+        ApplyError::Store(s) => s.to_string(),
+    })
+}
+
+/// A table's path as given, and its delimiter.
+fn table_path(given: &str) -> Result<(String, char), ToolError> {
+    let path = clean_path(given)?;
+    let delim = table::delimiter(&path).ok_or_else(|| ToolError(format!("{path} is not a table (.csv or .tsv)")))?;
+    Ok((path, delim))
+}
+
+/// A table's metadata and text.
+async fn read_table<S: Store>(vault: &Vault<S>, path: &str) -> Result<(FileMeta, String), ToolError> {
+    let (meta, bytes) = vault
+        .read(path)
+        .await?
+        .ok_or_else(|| ToolError(format!("{path} does not exist; write_table creates it (header first)")))?;
+    let body = String::from_utf8(bytes).map_err(|_| ToolError(format!("{path} is not UTF-8 text")))?;
+    Ok((meta, body))
+}
+
+/// An edit must leave a well-formed table well formed. One that was
+/// already ragged (edited by hand) only has to stay readable, so a bad row
+/// elsewhere never blocks Claude's change.
+fn guard_table(path: &str, before: &str, after: &str, delim: char) -> Result<(), ToolError> {
+    let e = if table::check(before, delim).is_ok() {
+        table::check(after, delim).err()
+    } else {
+        table::records(after, delim).err()
+    };
+    e.map_or(Ok(()), |e| Err(ToolError(format!("{path}: {e}; nothing was written"))))
+}
+
 fn refusal_text(r: &Refusal) -> String {
     match r {
         Refusal::CaseCollision { path, existing, .. } => format!("{path} differs only in case from {existing}"),
@@ -778,6 +920,19 @@ pub fn tools() -> Vec<Value> {
             json!({ "path": s("The vault path"), "rev": n("The revision") }), &["path", "rev"], true, false),
         tool("read_attachment", "Read an attachment", "An image attachment as an image (up to 5 MB); other files as their size.",
             json!({ "path": path }), &["path"], true, false),
+        tool("read_table", "Read a table", "A .csv or .tsv file's rows, with its rev and row count. Rows count from 1 after the header, which is always shown.",
+            json!({ "path": s("The vault path, e.g. Finance/Ledger.csv"), "start_row": n("First row, from 1"), "end_row": n("Last row, inclusive") }),
+            &["path"], true, false),
+        tool("append_rows", "Append rows to a table", "Add rows at the end of a .csv or .tsv file. Each row needs the header's number of fields; quote a field holding the delimiter.",
+            json!({ "path": s("The vault path"), "rows": s("The rows, one per line, in the file's format") }), &["path", "rows"], false, false),
+        tool("edit_table", "Edit a table", "Replace an exact passage of a .csv or .tsv file (a cell, a row). old_text must match exactly once (or set replace_all). Read the table first.",
+            json!({ "path": s("The vault path"), "old_text": s("The exact text to replace"), "new_text": s("What replaces it"),
+                   "replace_all": json!({ "type": "boolean", "description": "Replace every occurrence" }) }),
+            &["path", "old_text", "new_text"], false, false),
+        tool("write_table", "Write a table", "Create a .csv or .tsv file, or replace one whole. Replacing needs expected_rev, the rev read_table showed.",
+            json!({ "path": s("The vault path, e.g. Finance/Ledger.csv"), "content": s("The whole file, header first"),
+                   "expected_rev": n("The rev read_table showed; leave out to create") }),
+            &["path", "content"], false, true),
         tool("edit_note", "Edit a note", "Replace an exact passage of a note with new text. old_text must match exactly once (or set replace_all). Read the note first.",
             json!({ "path": path, "old_text": s("The exact text to replace"), "new_text": s("What replaces it"),
                    "replace_all": json!({ "type": "boolean", "description": "Replace every occurrence" }) }),
@@ -981,5 +1136,54 @@ mod tests {
         ok(&mut m, &mut v, "restore_version", json!({ "path": "Gone.md", "rev": 1 }));
         assert_eq!(file(&v, "Gone.md").as_deref(), Some("keep me\n"));
         assert!(ok(&mut m, &mut v, "read_version", json!({ "path": "Gone.md", "rev": 1 })).ends_with("keep me\n"));
+    }
+
+    #[test]
+    fn tables_read_and_write_with_a_rev_and_whole_rows() {
+        let mut m = Mcp::new();
+        let mut v = vault(&[("Finance/Ledger.csv", "Date,Payee,Amount\n2026-10-01,Rent,1200\n"), ("N.md", "see [[Ledger.csv]]\n")]);
+        let t = ok(&mut m, &mut v, "read_table", json!({ "path": "Finance/Ledger.csv" }));
+        assert_eq!(t, "path: Finance/Ledger.csv\nrev: 1\nrows: 1 (not counting the header)\n---\nDate,Payee,Amount\n2026-10-01,Rent,1200\n");
+        assert!(ok(&mut m, &mut v, "read_attachment", json!({ "path": "Finance/Ledger.csv" })).contains("use read_table"));
+
+        let t = ok(&mut m, &mut v, "append_rows", json!({ "path": "Finance/Ledger.csv", "rows": "2026-10-03,\"Shop, Inc\",42\n2026-10-04,Gas,30" }));
+        assert_eq!(t, "appended 2 rows to Finance/Ledger.csv, now rev 2");
+        let (err, t) = call(&mut m, &mut v, "append_rows", json!({ "path": "Finance/Ledger.csv", "rows": "2026-10-05,Oops" }));
+        assert!(err && t.contains("has 2 fields; the header has 3") && t.contains("nothing was written"), "{t}");
+
+        ok(&mut m, &mut v, "edit_table", json!({ "path": "Finance/Ledger.csv", "old_text": "Gas,30", "new_text": "Gas,31" }));
+        let (err, t) = call(&mut m, &mut v, "edit_table", json!({ "path": "Finance/Ledger.csv", "old_text": "Gas,31", "new_text": "Gas" }));
+        assert!(err && t.contains("fields"), "{t}");
+        assert_eq!(
+            file(&v, "Finance/Ledger.csv").as_deref(),
+            Some("Date,Payee,Amount\n2026-10-01,Rent,1200\n2026-10-03,\"Shop, Inc\",42\n2026-10-04,Gas,31\n")
+        );
+        let t = ok(&mut m, &mut v, "read_table", json!({ "path": "Finance/Ledger.csv", "start_row": 2, "end_row": 2 }));
+        assert!(t.contains("rev: 3\nrows: 3") && t.ends_with("---\nDate,Payee,Amount\n2026-10-03,\"Shop, Inc\",42"), "{t}");
+
+        // Replacing needs the rev read; a stale one is refused.
+        let (err, t) = call(&mut m, &mut v, "write_table", json!({ "path": "Finance/Ledger.csv", "content": "a,b\n" }));
+        assert!(err && t.contains("pass expected_rev"), "{t}");
+        let (err, t) = call(&mut m, &mut v, "write_table", json!({ "path": "Finance/Ledger.csv", "content": "a,b\n", "expected_rev": 2 }));
+        assert!(err && t.contains("is at rev 3"), "{t}");
+        assert_eq!(ok(&mut m, &mut v, "write_table", json!({ "path": "Finance/Ledger.csv", "content": "a,b\n1,2\n", "expected_rev": 3 })), "replaced Finance/Ledger.csv (1 rows), now rev 4");
+        assert!(ok(&mut m, &mut v, "write_table", json!({ "path": "Home/Appliances.tsv", "content": "Name\tModel\nFridge\tX1\n" })).starts_with("created"));
+        let (err, t) = call(&mut m, &mut v, "write_table", json!({ "path": "Notes.md", "content": "a\n" }));
+        assert!(err && t.contains("not a table"), "{t}");
+
+        // Every write is a revision by claude, and the notes still read.
+        assert!(ok(&mut m, &mut v, "history", json!({ "path": "Finance/Ledger.csv" })).starts_with("rev 4  1970-01-01 00:00 UTC  by claude"));
+        assert!(ok(&mut m, &mut v, "read_note", json!({ "path": "N" })).contains("links to: Finance/Ledger.csv"));
+        assert!(ok(&mut m, &mut v, "list_folder", json!({ "path": "Home" })).contains("Home/Appliances.tsv"));
+    }
+
+    #[test]
+    fn a_ragged_table_still_takes_a_good_edit() {
+        let mut m = Mcp::new();
+        let mut v = vault(&[("T.csv", "a,b\n1\n2,3\n")]);
+        assert!(ok(&mut m, &mut v, "read_table", json!({ "path": "T.csv" })).contains("warning: row 1 (line 2) has 1 fields"));
+        ok(&mut m, &mut v, "append_rows", json!({ "path": "T.csv", "rows": "4,5" }));
+        ok(&mut m, &mut v, "edit_table", json!({ "path": "T.csv", "old_text": "1\n", "new_text": "1,0\n" }));
+        assert_eq!(file(&v, "T.csv").as_deref(), Some("a,b\n1,0\n2,3\n4,5\n"));
     }
 }

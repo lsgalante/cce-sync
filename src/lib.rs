@@ -10,6 +10,8 @@
 //! - [`mem`]: an in-memory store, for tests and other hosts.
 //! - [`client`]: a device's side: what to download, remove and push.
 //! - [`mcp`] (feature `mcp`): the MCP server Claude's connector calls.
+//! - [`table`]: the reader and checks for `.csv`/`.tsv` files, which the
+//!   MCP tools read and write.
 //! - [`agenda`], [`gtask`]: the Google bridge's rules (the day's events,
 //!   `#gtask` tasks kept in step with Google Tasks).
 //!
@@ -24,6 +26,7 @@ pub mod mem;
 pub mod mcp;
 pub mod merge;
 pub mod proto;
+pub mod table;
 
 /// Drive a future whose every await is already ready (an in-memory store's)
 /// to completion on this thread. For tests and for synchronous hosts; a

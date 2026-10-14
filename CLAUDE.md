@@ -26,6 +26,7 @@ The library (no I/O, builds for wasm32):
 | `mcp` (feature `mcp`) | The MCP server Claude's connector calls: JSON-RPC (stateless Streamable HTTP), the tools, an in-memory `cce_vault::Index` rebuilt when the seq moves, writes as one batch from the device `claude` |
 | `agenda` | The Google bridge's agenda: which of Google Calendar's events fall on a local day (cut by local time text, no zone database), `Agenda::lines` for a daily note's ```` ```agenda ```` block |
 | `gtask` | `#gtask` lines kept in step with Google Tasks: `scan` a note, `plan` the acts against Google's tasks and the bases, `edit_note` the lines (found by id, or exact text) |
+| `table` | `.csv`/`.tsv` files for the MCP tools: the RFC 4180 reader (`records`), `check` (a header, every row its width), `appended` |
 | `mem` | `MemStore`, the in-memory `Store` the tests run on |
 | `tests.rs` | Scenarios for `core` |
 
@@ -112,6 +113,13 @@ MCP (`mcp`):
   vault does not).
 - **Dates come from Claude.** The server runs on UTC; the daily-note tools
   require the user's local date, and the server instructions say so.
+- **Tables go around the index, conditionally.** `.csv`/`.tsv` are
+  attachments (placeholders in the index, no merge), so `read_table`,
+  `append_rows`, `edit_table` and `write_table` read the store and write
+  one `Put` with `Pre::Rev` of the rev they read (`Pre::Absent` to
+  create), never `Pre::Any`. A write must leave a well-formed table well
+  formed (`guard_table`); one already ragged by hand only has to stay
+  readable, so a bad row elsewhere never blocks a good edit.
 - **`daily_note` carries the day's agenda** from the host's
   `AgendaSource` (`handle_with`), after the note and marked as not part
   of it; Claude must not write it into the note.
