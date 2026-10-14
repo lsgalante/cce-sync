@@ -57,7 +57,7 @@ kdl = { version = "4.6", optional = true }
 # The vault's root (config.kdl `vault { path }`) and its atomic write.
 cce-vault = { git = "https://github.com/lsgalante/cce-vault.git", rev = "5bec1038dc74780664463f072e759c002a8f1b24", optional = true }
 # read_request_line, for the status socket.
-cce-core = { git = "https://github.com/lsgalante/cce-core.git", rev = "388473078207ff41208e8648c04499e94632f20a", optional = true, default-features = false }
+cce-core = { git = "https://github.com/lsgalante/cce-core.git", rev = "9f76297206c2b00e10b8f5f522f5966d40279957", optional = true, default-features = false }
 
 # The workbook tools: the engine cce-spreadsheet uses (same version), and
 # zip to see which parts of a workbook IronCalc would not keep.

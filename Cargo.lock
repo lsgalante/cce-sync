@@ -211,11 +211,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "cce-core"
+version = "0.1.0"
+source = "git+https://github.com/lsgalante/cce-core.git?rev=9f76297206c2b00e10b8f5f522f5966d40279957#9f76297206c2b00e10b8f5f522f5966d40279957"
+dependencies = [
+ "libc",
+ "log",
+ "web-time",
+]
+
+[[package]]
 name = "cce-sync"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
- "cce-core",
+ "cce-core 0.1.0 (git+https://github.com/lsgalante/cce-core.git?rev=9f76297206c2b00e10b8f5f522f5966d40279957)",
  "cce-vault",
  "chrono",
  "ironcalc",
@@ -238,7 +248,7 @@ name = "cce-vault"
 version = "0.1.0"
 source = "git+https://github.com/lsgalante/cce-vault.git?rev=5bec1038dc74780664463f072e759c002a8f1b24#5bec1038dc74780664463f072e759c002a8f1b24"
 dependencies = [
- "cce-core",
+ "cce-core 0.1.0 (git+https://github.com/lsgalante/cce-core.git?rev=388473078207ff41208e8648c04499e94632f20a)",
  "chrono",
  "indexmap",
  "kdl",
