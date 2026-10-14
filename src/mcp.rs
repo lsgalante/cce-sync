@@ -16,9 +16,11 @@
 //! device. A rename becomes a server-side move, so an attachment's bytes
 //! never pass through the index; a placeholder is never uploaded.
 //!
-//! Tables (`.csv`, `.tsv`) are attachments, so their tools go around the
-//! index: each write is one `Put` from `claude` conditional on the rev the
-//! tool read ([`crate::table`] checks the rows first).
+//! Tables (`.csv`, `.tsv`) and workbooks (`.xlsx`, feature `xlsx`) are
+//! attachments, so their tools go around the index: each write is one `Put`
+//! from `claude` conditional on the rev the tool read ([`crate::table`]
+//! checks the rows first; [`crate::xlsx`] refuses a workbook whose parts
+//! IronCalc would drop).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -30,6 +32,8 @@ use serde_json::{json, Value};
 use crate::core::{ApplyError, Operation, Store, Vault};
 use crate::proto::{b64_encode, hash, FileMeta, Kind, Pre, Refusal, Rev, Seq};
 use crate::table;
+#[cfg(feature = "xlsx")]
+use crate::xlsx;
 
 /// The protocol revisions this server speaks, newest first. An
 /// `initialize` naming one of them gets it back; anything else gets the
@@ -63,6 +67,20 @@ have as many fields as the header. search does not look inside tables.
 - Every change is versioned. history and restore_version undo anything, including deletes.
 - Paths are vault paths like `Folder/Note.md`. Most tools also accept a bare note name and resolve \
 it the way a wikilink would.";
+
+#[cfg(feature = "xlsx")]
+const XLSX_INSTRUCTIONS: &str = "\n\
+- Workbooks are .xlsx files: read_spreadsheet shows a sheet's values and formulas, set_cells and \
+append_spreadsheet_rows change it (inputs are typed as in the sheet: `=` starts a formula), \
+create_spreadsheet makes a new one. A workbook with charts, pictures, pivot tables, Excel tables, \
+comments, macros, data validation or hyperlinks can be read but not written here.";
+
+fn instructions() -> String {
+    #[cfg(feature = "xlsx")]
+    return format!("{INSTRUCTIONS}{XLSX_INSTRUCTIONS}");
+    #[cfg(not(feature = "xlsx"))]
+    INSTRUCTIONS.to_string()
+}
 
 /// What the host sends back: an HTTP status and, unless it is 202, a JSON
 /// body.
@@ -158,7 +176,7 @@ impl Mcp {
                         "protocolVersion": version,
                         "capabilities": { "tools": { "listChanged": false } },
                         "serverInfo": { "name": "cce-sync", "title": "Vault", "version": env!("CARGO_PKG_VERSION") },
-                        "instructions": INSTRUCTIONS,
+                        "instructions": instructions(),
                     }),
                 )
             }
@@ -236,10 +254,11 @@ impl Mcp {
         }
     }
 
-    /// Write a table's bytes as `claude`, conditional on `pre`, and return
-    /// its rev. The index holds tables as placeholders, so rewriting one it
-    /// already has leaves it current; a new one waits for the next rebuild.
-    async fn put_table<S: Store>(&mut self, vault: &mut Vault<S>, path: &str, bytes: Vec<u8>, pre: Pre, now: i64) -> Result<Rev, ToolError> {
+    /// Write a table's or workbook's bytes as `claude`, conditional on
+    /// `pre`, and return its rev. The index holds attachments as
+    /// placeholders, so rewriting one it already has leaves it current; a
+    /// new one waits for the next rebuild.
+    async fn put_attachment<S: Store>(&mut self, vault: &mut Vault<S>, path: &str, bytes: Vec<u8>, pre: Pre, now: i64) -> Result<Rev, ToolError> {
         let before = vault.store.seq()?;
         let existed = vault.store.file(path)?.and_then(|r| r.meta()).is_some();
         let c = vault.apply(vec![Operation::Put { path: path.to_string(), pre, bytes }], DEVICE, now).await.map_err(apply_error)?;
@@ -422,6 +441,8 @@ impl Mcp {
                         ]}))
                     }
                     _ if table::delimiter(&path).is_some() => Ok(text(format!("{path}: {} bytes, rev {} (a table: use read_table)", meta.size, meta.rev))),
+                    #[cfg(feature = "xlsx")]
+                    _ if xlsx::is_workbook(&path) => Ok(text(format!("{path}: {} bytes, rev {} (a workbook: use read_spreadsheet)", meta.size, meta.rev))),
                     _ => Ok(text(format!("{path}: {} bytes, rev {} (not an image this tool returns)", meta.size, meta.rev))),
                 }
             }
@@ -572,7 +593,7 @@ impl Mcp {
                     (None, Some(e)) if e != 0 => return Err(ToolError(format!("{path} does not exist (it may have been deleted)"))),
                     (None, _) => Pre::Absent,
                 };
-                let rev = self.put_table(vault, &path, content.as_bytes().to_vec(), pre, now).await?;
+                let rev = self.put_attachment(vault, &path, content.as_bytes().to_vec(), pre, now).await?;
                 let what = if current.is_some() { "replaced" } else { "created" };
                 Ok(text(format!("{what} {path} ({} rows), now rev {rev}", recs.len() - 1)))
             }
@@ -586,7 +607,7 @@ impl Mcp {
                 let after = table::appended(&body, rows);
                 guard_table(&path, &body, &after, delim)?;
                 let added = table::records(rows, delim).map_or(0, |r| r.len());
-                let rev = self.put_table(vault, &path, after.into_bytes(), Pre::Rev(meta.rev), now).await?;
+                let rev = self.put_attachment(vault, &path, after.into_bytes(), Pre::Rev(meta.rev), now).await?;
                 Ok(text(format!("appended {added} row{} to {path}, now rev {rev}", if added == 1 { "" } else { "s" })))
             }
             "edit_table" => {
@@ -604,8 +625,80 @@ impl Mcp {
                 }
                 let after = if all { body.replace(old, new) } else { body.replacen(old, new, 1) };
                 guard_table(&path, &body, &after, delim)?;
-                let rev = self.put_table(vault, &path, after.into_bytes(), Pre::Rev(meta.rev), now).await?;
+                let rev = self.put_attachment(vault, &path, after.into_bytes(), Pre::Rev(meta.rev), now).await?;
                 Ok(text(format!("edited {path} ({} replacement{}), now rev {rev}", if all { n } else { 1 }, if all && n > 1 { "s" } else { "" })))
+            }
+            #[cfg(feature = "xlsx")]
+            "read_spreadsheet" => {
+                let path = workbook_path(req_str(a, "path")?)?;
+                let (meta, _, model) = read_workbook(vault, &path).await?;
+                let sheet = xlsx::sheet(&model, opt_str(a, "sheet"))?;
+                let area = opt_str(a, "range").map(xlsx::range).transpose()?;
+                let mut sheets = Vec::new();
+                for (i, name) in xlsx::sheet_names(&model).iter().enumerate() {
+                    sheets.push(match xlsx::used(&model, i as u32)? {
+                        Some((t, l, b, r)) => format!("{name} ({}{t}:{}{b})", xlsx::column_name(l), xlsx::column_name(r)),
+                        None => format!("{name} (empty)"),
+                    });
+                }
+                let grid = xlsx::render(&model, sheet, area)?;
+                let name = &xlsx::sheet_names(&model)[sheet as usize];
+                Ok(text(format!("path: {path}\nrev: {}\nsheets: {}\nsheet: {name}\n---\n{grid}", meta.rev, sheets.join(", "))))
+            }
+            #[cfg(feature = "xlsx")]
+            "set_cells" => {
+                let path = workbook_path(req_str(a, "path")?)?;
+                let cells = a
+                    .get("cells")
+                    .and_then(Value::as_object)
+                    .filter(|c| !c.is_empty())
+                    .ok_or_else(|| ToolError("cells (an object like {\"B4\": \"=SUM(B1:B3)\"}) is required".into()))?;
+                let cells: Vec<(String, String)> = cells.iter().map(|(k, v)| (k.clone(), input(v))).collect();
+                let (meta, bytes, mut model) = read_workbook(vault, &path).await?;
+                if let Some(e) = opt_u64(a, "expected_rev").filter(|e| *e != meta.rev) {
+                    return Err(ToolError(format!("{path} is at rev {}, not {e}: it changed since you read it", meta.rev)));
+                }
+                refuse_unkept(&path, &bytes)?;
+                let sheet = xlsx::sheet(&model, opt_str(a, "sheet"))?;
+                xlsx::set(&mut model, sheet, &cells)?;
+                let rev = self.put_attachment(vault, &path, xlsx::save(&model)?, Pre::Rev(meta.rev), now).await?;
+                let mut out = vec![format!("set {} cell{} in {path}, now rev {rev}", cells.len(), if cells.len() == 1 { "" } else { "s" })];
+                for (addr, _) in cells.iter().take(50) {
+                    let (row, col) = xlsx::cell(addr)?;
+                    out.push(xlsx::describe(&model, sheet, row, col)?);
+                }
+                Ok(text(out.join("\n")))
+            }
+            #[cfg(feature = "xlsx")]
+            "append_spreadsheet_rows" => {
+                let path = workbook_path(req_str(a, "path")?)?;
+                let rows = rows_arg(a, "rows")?;
+                if rows.is_empty() {
+                    return Err(ToolError("rows is empty".into()));
+                }
+                let (meta, bytes, mut model) = read_workbook(vault, &path).await?;
+                refuse_unkept(&path, &bytes)?;
+                let sheet = xlsx::sheet(&model, opt_str(a, "sheet"))?;
+                let first = xlsx::append(&mut model, sheet, &rows)?;
+                let rev = self.put_attachment(vault, &path, xlsx::save(&model)?, Pre::Rev(meta.rev), now).await?;
+                let last = first + rows.len() as i32 - 1;
+                Ok(text(format!("appended rows {first}-{last} to {path}, now rev {rev}")))
+            }
+            #[cfg(feature = "xlsx")]
+            "create_spreadsheet" => {
+                let path = workbook_path(req_str(a, "path")?)?;
+                let given = a.get("sheets").and_then(Value::as_array).ok_or_else(|| ToolError("sheets is required".into()))?;
+                let mut sheets = Vec::new();
+                for (i, s) in given.iter().enumerate() {
+                    let name = s.get("name").and_then(Value::as_str).map_or_else(|| format!("Sheet{}", i + 1), str::to_string);
+                    sheets.push((name, rows_arg(s, "rows").unwrap_or_default()));
+                }
+                if vault.store.file(&path)?.and_then(|r| r.meta()).is_some() {
+                    return Err(ToolError(format!("{path} exists: change it with set_cells or append_spreadsheet_rows")));
+                }
+                let model = xlsx::create(&sheets)?;
+                let rev = self.put_attachment(vault, &path, xlsx::save(&model)?, Pre::Absent, now).await?;
+                Ok(text(format!("created {path} ({} sheet{}), rev {rev}", sheets.len(), if sheets.len() == 1 { "" } else { "s" })))
             }
             "restore_version" => {
                 let path = req_str(a, "path")?.to_string();
@@ -788,6 +881,58 @@ async fn read_table<S: Store>(vault: &Vault<S>, path: &str) -> Result<(FileMeta,
     Ok((meta, body))
 }
 
+#[cfg(feature = "xlsx")]
+fn workbook_path(given: &str) -> Result<String, ToolError> {
+    let path = clean_path(given)?;
+    if !xlsx::is_workbook(&path) {
+        return Err(ToolError(format!("{path} is not a workbook (.xlsx)")));
+    }
+    Ok(path)
+}
+
+/// A workbook's metadata, bytes and model.
+#[cfg(feature = "xlsx")]
+async fn read_workbook<S: Store>(vault: &Vault<S>, path: &str) -> Result<(FileMeta, Vec<u8>, ironcalc::base::Model<'static>), ToolError> {
+    let (meta, bytes) = vault
+        .read(path)
+        .await?
+        .ok_or_else(|| ToolError(format!("{path} does not exist; create_spreadsheet makes a new one")))?;
+    let model = xlsx::load(&bytes).map_err(|e| ToolError(format!("{path}: {e}")))?;
+    Ok((meta, bytes, model))
+}
+
+/// Writing a workbook through IronCalc must not drop parts it doesn't keep.
+#[cfg(feature = "xlsx")]
+fn refuse_unkept(path: &str, bytes: &[u8]) -> Result<(), ToolError> {
+    let lost = xlsx::unkept(bytes)?;
+    if lost.is_empty() {
+        return Ok(());
+    }
+    Err(ToolError(format!(
+        "{path} has {}, which saving it here would drop: change it in cce-spreadsheet on the laptop instead (read_spreadsheet still reads it)",
+        lost.join(", ")
+    )))
+}
+
+/// A cell input from JSON: text as is, numbers and booleans as typed.
+#[cfg(feature = "xlsx")]
+fn input(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Bool(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
+        Value::Null => String::new(),
+        other => other.to_string(),
+    }
+}
+
+/// Rows of cell inputs: an array of arrays.
+#[cfg(feature = "xlsx")]
+fn rows_arg(a: &Value, k: &str) -> Result<Vec<Vec<String>>, ToolError> {
+    let bad = || ToolError(format!("{k} must be an array of rows, each an array of cells"));
+    let rows = a.get(k).and_then(Value::as_array).ok_or_else(bad)?;
+    rows.iter().map(|r| r.as_array().map(|cells| cells.iter().map(input).collect()).ok_or_else(bad)).collect()
+}
+
 /// An edit must leave a well-formed table well formed. One that was
 /// already ragged (edited by hand) only has to stay readable, so a bad row
 /// elsewhere never blocks Claude's change.
@@ -891,7 +1036,8 @@ fn n(d: &str) -> Value {
 pub fn tools() -> Vec<Value> {
     let path = s("A vault path (Folder/Note.md) or a note name, resolved like a wikilink");
     let date = s("The user's local date, YYYY-MM-DD");
-    vec![
+    #[allow(unused_mut)]
+    let mut all = vec![
         tool("search", "Search notes", "Full-text search over every note (all words must match); a single #tag lists the notes with that tag.",
             json!({ "query": s("Words to find, or #tag"), "limit": n("Most files to return (default 20)") }), &["query"], true, false),
         tool("find_notes", "Find notes by name", "Fuzzy match on note names and aliases, like a quick switcher.",
@@ -956,6 +1102,33 @@ pub fn tools() -> Vec<Value> {
             json!({ "path": path }), &["path"], false, true),
         tool("restore_version", "Restore a revision", "Put an earlier revision's text back as a new revision (history is never rewritten). Works for deleted files.",
             json!({ "path": s("The vault path"), "rev": n("The revision to bring back") }), &["path", "rev"], false, true),
+    ];
+    #[cfg(feature = "xlsx")]
+    all.extend(xlsx_tools());
+    all
+}
+
+#[cfg(feature = "xlsx")]
+fn xlsx_tools() -> Vec<Value> {
+    let path = s("The vault path, e.g. Finance/Budget.xlsx");
+    let sheet = s("The sheet's name (default: the first sheet)");
+    let rows = json!({ "type": "array", "description": "Rows, each an array of cell inputs (text, numbers, or formulas starting with =)",
+                       "items": { "type": "array", "items": { "type": ["string", "number", "boolean", "null"] } } });
+    vec![
+        tool("read_spreadsheet", "Read a spreadsheet", "A .xlsx workbook: its sheets and used ranges, then one sheet's displayed values as a grid (column letters across, row numbers down) and its formulas. Large sheets are cut at a whole row; pass a range for the rest.",
+            json!({ "path": path, "sheet": sheet, "range": s("Only these cells, e.g. A1:F40") }), &["path"], true, false),
+        tool("set_cells", "Set cells", "Set cells in a .xlsx sheet as if typed (= starts a formula; an empty string clears the cell), recalculate, and save. Answers with what each cell now shows.",
+            json!({ "path": path, "sheet": sheet,
+                    "cells": json!({ "type": "object", "description": "Cell address to input, e.g. {\"B4\": \"=SUM(B1:B3)\", \"A5\": \"Groceries\"}",
+                                     "additionalProperties": { "type": ["string", "number", "boolean", "null"] } }),
+                    "expected_rev": n("The rev read_spreadsheet showed; refused if it changed since") }),
+            &["path", "cells"], false, false),
+        tool("append_spreadsheet_rows", "Append spreadsheet rows", "Add rows under the used part of a .xlsx sheet, from its first used column; formulas recalculate.",
+            json!({ "path": path, "sheet": sheet, "rows": rows.clone() }), &["path", "rows"], false, false),
+        tool("create_spreadsheet", "Create a spreadsheet", "Make a new .xlsx workbook with named sheets and their rows.",
+            json!({ "path": path, "sheets": json!({ "type": "array", "description": "The sheets, in order",
+                    "items": { "type": "object", "properties": { "name": s("The sheet's name"), "rows": rows }, "required": ["name"] } }) }),
+            &["path", "sheets"], false, false),
     ]
 }
 
@@ -1185,5 +1358,61 @@ mod tests {
         ok(&mut m, &mut v, "append_rows", json!({ "path": "T.csv", "rows": "4,5" }));
         ok(&mut m, &mut v, "edit_table", json!({ "path": "T.csv", "old_text": "1\n", "new_text": "1,0\n" }));
         assert_eq!(file(&v, "T.csv").as_deref(), Some("a,b\n1,0\n2,3\n4,5\n"));
+    }
+
+    #[cfg(feature = "xlsx")]
+    #[test]
+    fn workbooks_create_read_set_and_append() {
+        let mut m = Mcp::new();
+        let mut v = vault(&[]);
+        let t = ok(&mut m, &mut v, "create_spreadsheet", json!({ "path": "Finance/Budget.xlsx", "sheets": [
+            { "name": "Budget", "rows": [["Item", "Cost"], ["Rent", 1200], ["Food", "300"], ["Total", "=SUM(B2:B3)"]] },
+            { "name": "Notes" },
+        ] }));
+        assert_eq!(t, "created Finance/Budget.xlsx (2 sheets), rev 1");
+        let (err, t) = call(&mut m, &mut v, "create_spreadsheet", json!({ "path": "Finance/Budget.xlsx", "sheets": [{ "name": "S" }] }));
+        assert!(err && t.contains("exists"), "{t}");
+
+        let t = ok(&mut m, &mut v, "read_spreadsheet", json!({ "path": "Finance/Budget.xlsx" }));
+        assert!(t.starts_with("path: Finance/Budget.xlsx\nrev: 1\nsheets: Budget (A1:B4), Notes (empty)\nsheet: Budget\n---\n\tA\tB\n1\tItem\tCost\n"), "{t}");
+        assert!(t.contains("4\tTotal\t1500") && t.ends_with("formulas:\nB4 =SUM(B2:B3)"), "{t}");
+
+        let t = ok(&mut m, &mut v, "append_spreadsheet_rows", json!({ "path": "Finance/Budget.xlsx", "rows": [["Gas", 40]] }));
+        assert_eq!(t, "appended rows 5-5 to Finance/Budget.xlsx, now rev 2");
+        let (err, t) = call(&mut m, &mut v, "set_cells", json!({ "path": "Finance/Budget.xlsx", "cells": { "B4": "=SUM(B2:B3)+B5" }, "expected_rev": 1 }));
+        assert!(err && t.contains("is at rev 2"), "{t}");
+        let t = ok(&mut m, &mut v, "set_cells", json!({ "path": "Finance/Budget.xlsx", "cells": { "B4": "=SUM(B2:B3)+B5" } }));
+        assert_eq!(t, "set 1 cell in Finance/Budget.xlsx, now rev 3\nB4 = 1540 (=SUM(B2:B3)+B5)");
+        assert!(ok(&mut m, &mut v, "read_spreadsheet", json!({ "path": "Finance/Budget.xlsx", "sheet": "budget", "range": "A5:B5" })).ends_with("---\n\tA\tB\n5\tGas\t40"));
+        let (err, t) = call(&mut m, &mut v, "read_spreadsheet", json!({ "path": "Finance/Budget.xlsx", "sheet": "Nope" }));
+        assert!(err && t.contains("the sheets are Budget, Notes"), "{t}");
+        assert!(ok(&mut m, &mut v, "history", json!({ "path": "Finance/Budget.xlsx" })).starts_with("rev 3  1970-01-01 00:00 UTC  by claude"));
+        assert!(ok(&mut m, &mut v, "read_attachment", json!({ "path": "Finance/Budget.xlsx" })).contains("use read_spreadsheet"));
+    }
+
+    #[cfg(feature = "xlsx")]
+    #[test]
+    fn a_workbook_with_parts_ironcalc_drops_is_read_but_never_written() {
+        use std::io::Write;
+        let model = crate::xlsx::create(&[("S".into(), vec![vec!["a".into()]])]).unwrap();
+        let plain = crate::xlsx::save(&model).unwrap();
+        // The same workbook with a chart part added.
+        let mut src = zip::ZipArchive::new(std::io::Cursor::new(plain)).unwrap();
+        let mut out = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for i in 0..src.len() {
+            out.raw_copy_file(src.by_index(i).unwrap()).unwrap();
+        }
+        out.start_file("xl/charts/chart1.xml", zip::write::FileOptions::default()).unwrap();
+        out.write_all(b"<c:chartSpace/>").unwrap();
+        let bytes = out.finish().unwrap().into_inner();
+        let mut v = Vault::new(MemStore::default());
+        run(v.apply(vec![Operation::Put { path: "C.xlsx".into(), pre: Pre::Absent, bytes: bytes.clone() }], "laptop", 1)).unwrap();
+        let mut m = Mcp::new();
+        assert!(ok(&mut m, &mut v, "read_spreadsheet", json!({ "path": "C.xlsx" })).ends_with("1\ta"));
+        let (err, t) = call(&mut m, &mut v, "set_cells", json!({ "path": "C.xlsx", "cells": { "A2": "b" } }));
+        assert!(err && t.contains("has charts, which saving it here would drop"), "{t}");
+        let (err, _) = call(&mut m, &mut v, "append_spreadsheet_rows", json!({ "path": "C.xlsx", "rows": [["b"]] }));
+        assert!(err);
+        assert_eq!(run(v.read("C.xlsx")).unwrap().unwrap().1, bytes);
     }
 }

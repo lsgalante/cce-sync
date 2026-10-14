@@ -27,6 +27,7 @@ The library (no I/O, builds for wasm32):
 | `agenda` | The Google bridge's agenda: which of Google Calendar's events fall on a local day (cut by local time text, no zone database), `Agenda::lines` for a daily note's ```` ```agenda ```` block |
 | `gtask` | `#gtask` lines kept in step with Google Tasks: `scan` a note, `plan` the acts against Google's tasks and the bases, `edit_note` the lines (found by id, or exact text) |
 | `table` | `.csv`/`.tsv` files for the MCP tools: the RFC 4180 reader (`records`), `check` (a header, every row its width), `appended` |
+| `xlsx` (feature `xlsx`) | `.xlsx` workbooks for the MCP tools, on IronCalc 0.8.3 (cce-spreadsheet's engine): load/save, `create`, `render` (a grid of shown values + the formulas), `set`, `append`, A1 addresses, and `unkept` (the parts a save would drop) |
 | `mem` | `MemStore`, the in-memory `Store` the tests run on |
 | `tests.rs` | Scenarios for `core` |
 
@@ -120,6 +121,15 @@ MCP (`mcp`):
   create), never `Pre::Any`. A write must leave a well-formed table well
   formed (`guard_table`); one already ragged by hand only has to stay
   readable, so a bad row elsewhere never blocks a good edit.
+- **A workbook IronCalc can't keep whole is never written.** IronCalc
+  drops charts, pictures, pivot tables, Excel tables, comments, macros,
+  data validation and hyperlinks on save; `set_cells` and
+  `append_spreadsheet_rows` refuse a workbook that has any (`unkept`) and
+  point at cce-spreadsheet. Reading it is fine. Workbook writes are
+  `Pre::Rev` of the rev read, like tables. Only the server enables
+  `xlsx`, and its wasm32 build patches `ironcalc` to a vendored copy
+  without zip's C codecs (`cce-sync-server/vendor/ironcalc/VENDORED.md`);
+  keep the version equal to cce-spreadsheet's.
 - **`daily_note` carries the day's agenda** from the host's
   `AgendaSource` (`handle_with`), after the note and marked as not part
   of it; Claude must not write it into the note.
@@ -191,6 +201,7 @@ the bridge).
 
 ```sh
 cargo test -p cce-sync                       # library, client scenarios, CLI
+cargo test -p cce-sync --lib --features xlsx  # plus the workbook tools
 cargo build -p cce-sync --lib --no-default-features --target wasm32-unknown-unknown
 dev/e2e-daemon.sh                            # two daemons against a fresh `wrangler dev`
 ```

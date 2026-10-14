@@ -12,6 +12,7 @@
 //! - [`mcp`] (feature `mcp`): the MCP server Claude's connector calls.
 //! - [`table`]: the reader and checks for `.csv`/`.tsv` files, which the
 //!   MCP tools read and write.
+//! - [`xlsx`] (feature `xlsx`): workbooks for the MCP tools, on IronCalc.
 //! - [`agenda`], [`gtask`]: the Google bridge's rules (the day's events,
 //!   `#gtask` tasks kept in step with Google Tasks).
 //!
@@ -27,6 +28,8 @@ pub mod mcp;
 pub mod merge;
 pub mod proto;
 pub mod table;
+#[cfg(feature = "xlsx")]
+pub mod xlsx;
 
 /// Drive a future whose every await is already ready (an in-memory store's)
 /// to completion on this thread. For tests and for synchronous hosts; a

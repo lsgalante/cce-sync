@@ -21,6 +21,10 @@ default = ["daemon"]
 # The MCP tools (`mcp`): the vault index, whose settings reader is the
 # daily notes' too. The server builds this for wasm32.
 mcp = ["dep:cce-vault", "dep:chrono"]
+# The workbook tools (.xlsx, on IronCalc). The server builds this; for
+# wasm32 it patches ironcalc to a copy whose zip has only deflate (the
+# default bzip2/zstd codecs are C and don't build there).
+xlsx = ["mcp", "dep:ironcalc", "dep:zip"]
 # The laptop binary: the daemon, import, status, history, restore, login.
 daemon = [
     "mcp",
@@ -54,6 +58,11 @@ kdl = { version = "4.6", optional = true }
 cce-vault = { git = "https://github.com/lsgalante/cce-vault.git", rev = "5bec1038dc74780664463f072e759c002a8f1b24", optional = true }
 # read_request_line, for the status socket.
 cce-core = { git = "https://github.com/lsgalante/cce-core.git", rev = "388473078207ff41208e8648c04499e94632f20a", optional = true, default-features = false }
+
+# The workbook tools: the engine cce-spreadsheet uses (same version), and
+# zip to see which parts of a workbook IronCalc would not keep.
+ironcalc = { version = "0.8.3", optional = true }
+zip = { version = "0.6", optional = true, default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 tempfile = "3"
