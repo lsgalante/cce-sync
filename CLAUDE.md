@@ -32,7 +32,7 @@ The library (no I/O, builds for wasm32):
 | `tests.rs` | Scenarios for `core` |
 
 The binary (`daemon` feature, on by default; the wasm users depend with
-`default-features = false`, cce-sync-server adding `features = ["mcp"]`):
+`default-features = false`, cce-sync-server adding `features = ["mcp", "xlsx"]`):
 
 | File | What it owns |
 | --- | --- |
