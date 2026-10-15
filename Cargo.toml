@@ -55,7 +55,7 @@ keyring = { version = "3", optional = true, features = ["sync-secret-service"] }
 chrono = { version = "0.4", optional = true, default-features = false, features = ["clock"] }
 kdl = { version = "4.6", optional = true }
 # The vault's root (config.kdl `vault { path }`) and its atomic write.
-cce-vault = { git = "https://github.com/lsgalante/cce-vault.git", rev = "5bec1038dc74780664463f072e759c002a8f1b24", optional = true }
+cce-vault = { git = "https://github.com/lsgalante/cce-vault.git", rev = "dc0aa0eb70691e26c1afcc70e87eb4b63e2fb7b6", optional = true }
 # read_request_line, for the status socket.
 cce-core = { git = "https://github.com/lsgalante/cce-core.git", rev = "33bc46f1cbede6cda770683932c626667805d326", optional = true, default-features = false }
 
