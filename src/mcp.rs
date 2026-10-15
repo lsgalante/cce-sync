@@ -796,32 +796,7 @@ fn template(index: &Index, t: &str) -> Option<String> {
 /// Append `add` to a note: at the end, or at the end of the section under
 /// `heading` (before the next heading of the same or a higher level).
 fn append(index: &mut Index, path: &str, add: &str, heading: Option<&str>) -> Result<(), ToolError> {
-    let Some(heading) = heading else {
-        index.append(path, add)?;
-        return Ok(());
-    };
-    let body = index.read_text(path).unwrap_or_default();
-    let want = heading.trim().trim_start_matches('#').trim().to_lowercase();
-    let note = cce_vault::parse::parse(&body);
-    let Some(h) = note.headings.iter().find(|h| h.text.trim().to_lowercase() == want) else {
-        return Err(ToolError(format!("{path} has no heading \"{heading}\"")));
-    };
-    let next = note.headings.iter().find(|n| n.line > h.line && n.level <= h.level).map(|n| n.line);
-    let mut lines: Vec<&str> = body.split_inclusive('\n').collect();
-    let mut at = next.unwrap_or(lines.len());
-    // Before the blank lines that end the section.
-    while at > h.line + 1 && lines[at - 1].trim().is_empty() {
-        at -= 1;
-    }
-    let mut block = add.to_string();
-    if !block.ends_with('\n') {
-        block.push('\n');
-    }
-    if at > 0 && !lines[at - 1].ends_with('\n') {
-        block.insert(0, '\n');
-    }
-    lines.insert(at, &block);
-    index.write_text(path, &lines.concat())?;
+    index.append_under(path, add, heading)?;
     Ok(())
 }
 
